@@ -9,7 +9,7 @@ Deploy (production):
   gunicorn -w 4 -b 0.0.0.0:5000 app:app
   # or set PORT: gunicorn -w 4 -b 0.0.0.0:$PORT app:app
 
-Set GEMINI_API_KEY (and optionally CHROMA_PERSIST_DIR) in the environment.
+Set OPENROUTER_API_KEY (recommended) or GEMINI_API_KEY in the environment. Optionally CHROMA_PERSIST_DIR.
 """
 import os
 from pathlib import Path
@@ -35,10 +35,14 @@ def get_rag():
     global _rag_system
     if _rag_system is None:
         from RagPipeline.generation import RAGSystem
-        key = os.getenv("GEMINI_API_KEY")
-        if not key:
-            raise RuntimeError("GEMINI_API_KEY is not set")
-        _rag_system = RAGSystem(key)
+        openrouter_key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+        gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+        if not openrouter_key and not gemini_key:
+            raise RuntimeError(
+                "Set OPENROUTER_API_KEY (recommended) or GEMINI_API_KEY in .env. "
+                "Get an OpenRouter key at https://openrouter.ai/keys"
+            )
+        _rag_system = RAGSystem(openrouter_api_key=openrouter_key or None, gemini_api_key=gemini_key or None)
     return _rag_system
 
 

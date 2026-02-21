@@ -9,7 +9,7 @@ import json
 import requests
 from pathlib import Path
 from RagPipeline.retreival import CodebaseRetriever
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 
 # For fallback when metadata has no source_url (e.g. pre-existing DB)
@@ -17,11 +17,22 @@ _PROCESSED_DATA_DIR = Path(__file__).resolve().parent.parent / "Data" / "files" 
 
 load_dotenv()
 
-# Default: prefer faster models first (2.5-flash often has more quota than 2.0-flash)
+# --- OpenRouter (preferred when OPENROUTER_API_KEY is set) ---
+# https://openrouter.ai/docs/api-reference/chat-completions
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-001")
+OPENROUTER_MODEL_FALLBACKS = os.getenv(
+    "OPENROUTER_MODEL_FALLBACKS",
+    "google/gemini-2.0-flash-exp,anthropic/claude-3-haiku,meta-llama/llama-3.1-8b-instruct"
+).split(",")
+
+# --- Gemini direct (used when OPENROUTER_API_KEY is not set) ---
 # Set GEMINI_MODEL to override; GEMINI_FAST_MODE=1 = fewer retries, shorter waits
+# GEMINI_SKIP_GEMMA=1 (default): do not fall back to Gemma when Gemini hits quota
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview")
 GEMINI_MODEL_FALLBACKS = os.getenv("GEMINI_MODEL_FALLBACKS", "gemini-2.0-flash,gemini-1.5-flash,gemini-1.5-pro").split(",")
 GEMINI_FAST_MODE = os.getenv("GEMINI_FAST_MODE", "1").strip().lower() in ("1", "true", "yes")
+GEMINI_SKIP_GEMMA = os.getenv("GEMINI_SKIP_GEMMA", "1").strip().lower() in ("1", "true", "yes")
 
 # Official REST endpoint: https://ai.google.dev/gemini-api/docs/rest
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -76,6 +87,9 @@ def _get_available_gemini_models(api_key: str) -> list:
         for s in supported:
             if s not in ordered:
                 ordered.append(s)
+        # When Gemini hits quota, API list can leave only Gemma (e.g. gemma-3-1b-it). Skip Gemma by default so we return context fallback instead of weak answers.
+        if GEMINI_SKIP_GEMMA:
+            ordered = [m for m in ordered if "gemma" not in m.lower()]
         _cached_available_models = ordered
         return ordered
     except Exception:
@@ -100,9 +114,8 @@ def _parse_retry_seconds(err_detail) -> int:
     return 60
 
 
-def _gemini_generate_content(api_key: str, prompt: str, temperature: float = 0.1, max_tokens: int = 500):
-    """Call Gemini generateContent REST API and return the generated text.
-    On 429 (quota), retries after waiting; tries fallback models. Returns None if all fail."""
+def _gemini_generate_content(api_key: str, prompt: str, temperature: float = 0.1, max_tokens: int = 500) -> tuple:
+    """Call Gemini generateContent REST API. On 429, retries then tries fallback models. Returns (text, model_id) or (None, None)."""
     discovered = _get_available_gemini_models(api_key)
     if discovered:
         models_to_try = discovered
@@ -126,7 +139,7 @@ def _gemini_generate_content(api_key: str, prompt: str, temperature: float = 0.1
 
         max_attempts = 1 if GEMINI_FAST_MODE else 3
         for attempt in range(max_attempts):
-            resp = requests.post(url, json=payload, headers=headers, timeout=90)
+            resp = requests.post(url, json=payload, headers=headers, timeout=120)
             if resp.ok:
                 data = resp.json()
                 candidates = data.get("candidates") or []
@@ -134,8 +147,8 @@ def _gemini_generate_content(api_key: str, prompt: str, temperature: float = 0.1
                     raise RuntimeError("Gemini returned no candidates")
                 parts = (candidates[0].get("content") or {}).get("parts") or []
                 if not parts:
-                    return ""
-                return (parts[0].get("text") or "").strip()
+                    return ("", model)
+                return ((parts[0].get("text") or "").strip(), model)
 
             try:
                 err_detail = resp.json()
@@ -173,13 +186,57 @@ def _gemini_generate_content(api_key: str, prompt: str, temperature: float = 0.1
 
         if last_error and model == models_to_try[-1]:
             print("All Gemini models failed (quota or not found). Use local fallback or set GEMINI_MODEL_FALLBACKS.")
-            return None
+            return (None, None)
         if last_error:
             idx = models_to_try.index(model)
             next_model = models_to_try[idx + 1] if idx + 1 < len(models_to_try) else "?"
             print(f"Model {model} quota exceeded. Trying next model: {next_model}...")
             last_error = None
-    return None
+    return (None, None)
+
+
+def _openrouter_generate_content(api_key: str, prompt: str, temperature: float = 0.1, max_tokens: int = 500) -> tuple:
+    """Call OpenRouter chat/completions (OpenAI-compatible). Tries OPENROUTER_MODEL then fallbacks. Returns (text, model_id) or (None, None)."""
+    url = f"{OPENROUTER_BASE}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    models_to_try = [OPENROUTER_MODEL] + [m.strip() for m in OPENROUTER_MODEL_FALLBACKS if m.strip()]
+
+    for model in models_to_try:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=120)
+            if resp.ok:
+                data = resp.json()
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                msg = choices[0].get("message") or {}
+                text = (msg.get("content") or "").strip()
+                if text:
+                    return (text, model)
+                continue
+            try:
+                err = resp.json()
+            except Exception:
+                err = resp.text
+            if resp.status_code == 429:
+                print(f"OpenRouter quota exceeded (model={model}). Trying next model...")
+                continue
+            if resp.status_code in (404, 400, 401):
+                print(f"OpenRouter {resp.status_code} for {model}: {err}. Trying next model...")
+                continue
+            print(f"OpenRouter {resp.status_code}: {err}")
+        except requests.RequestException as e:
+            print(f"OpenRouter request failed for {model}: {e}")
+    return (None, None)
 
 
 def _get_source_url_and_title(meta: dict) -> tuple:
@@ -203,6 +260,48 @@ def _get_source_url_and_title(meta: dict) -> tuple:
     return ("", title or "")
 
 
+def _is_comparison_query(query: str) -> bool:
+    """True if the user is asking to compare/contrast two or more distinct concepts (e.g. SFOC vs RPAS)."""
+    q = query.strip().lower()
+    if any(
+        p in q
+        for p in (
+            "difference between",
+            "difference of",
+            "compare",
+            "contrast",
+            " vs ",
+            " versus ",
+        )
+    ):
+        return True
+    if " and " in q and ("difference" in q or "different" in q or "same" in q):
+        return True
+    return False
+
+
+def _is_procedural_query(query: str) -> bool:
+    """True if the user is asking HOW to do something (e.g. get a licence, register, become a pilot)—needs steps and key requirements."""
+    q = query.strip().lower()
+    if not ("how" in q or "what do i need" in q or "steps" in q or "process" in q):
+        return False
+    return any(
+        w in q
+        for w in (
+            "licen", "certificate", "register", "pilot", "permit", "fly",
+            "get ", "become", "apply", "requirement", "need to",
+        )
+    )
+
+
+def _is_basic_advanced_certificate_comparison(query: str) -> bool:
+    """True if the user is comparing Basic vs Advanced (pilot) certificate—answer from context or standard Canadian distinctions."""
+    q = query.strip().lower()
+    if "basic" not in q and "advanced" not in q:
+        return False
+    return "certificate" in q or "licen" in q or "pilot" in q or _is_comparison_query(query)
+
+
 def _first_three_source_links(used_metadatas: List[dict]) -> List[Dict[str, str]]:
     """Deduplicate by URL, take first 3, return list of {url, title} for display."""
     seen = set()
@@ -218,9 +317,11 @@ def _first_three_source_links(used_metadatas: List[dict]) -> List[Dict[str, str]
 
 
 class RAGSystem:
-    def __init__(self, gemini_api_key: str):
-        self.gemini_api_key = gemini_api_key
-        self.retriever = CodebaseRetriever(gemini_api_key)
+    def __init__(self, openrouter_api_key: Optional[str] = None, gemini_api_key: Optional[str] = None):
+        self.openrouter_api_key = (openrouter_api_key or "").strip() or None
+        self.gemini_api_key = (gemini_api_key or "").strip() or None
+        # Retriever/embeddings use env (GEMINI_API_KEY / USE_GEMINI_EMBEDDINGS); pass a dummy if no Gemini key so Chroma still inits
+        self.retriever = CodebaseRetriever(self.gemini_api_key or self.openrouter_api_key or "dummy-key")
 
     def generate_answer(self, query: str, max_context_length: int = 4500) -> Dict:
         """Generate answer using retrieved context and Gemini."""
@@ -254,14 +355,45 @@ class RAGSystem:
 
         context = "\n".join(context_parts)
 
-        prompt = f"""You are a helpful assistant that answers questions about drone safety and regulations in Canada.
-Use only the Context below to answer. Cite specific numbers and limits when they appear.
+        comparison_instruction = ""
+        if _is_comparison_query(query):
+            comparison_instruction = (
+                "\n\nIMPORTANT: The user is asking for a COMPARISON between two (or more) distinct concepts. "
+                "In your answer: (1) Clearly define or describe EACH concept separately (e.g. what is SFOC, what is RPAS). "
+                "(2) Then explain how they differ or how they relate. "
+                "Do NOT describe a single combined or hybrid term (e.g. 'SFOC-RPAS') as if it were one of the things being compared—treat each term the user asked about as a distinct concept and compare those.\n"
+            )
 
-Answer in plain language: write full sentences that explain the actual rules or steps. Do NOT just list section titles, menu labels, or link names from the context (e.g. do not answer "where can I fly" with only "Search the interactive map" or "Prohibited areas"—instead explain where you can fly, e.g. in uncontrolled airspace, away from airports, and that you should check the map or CARs for specifics).
+        procedural_instruction = ""
+        if _is_procedural_query(query):
+            procedural_instruction = (
+                "\n\nIMPORTANT: The user is asking HOW to do something (e.g. get a licence, register). Give a genuinely helpful answer:\n"
+                "(1) A clear step-by-step where the Context supports it (e.g. register drone if applicable → Basic vs Advanced → take exam → flight review if Advanced).\n"
+                "(2) Key context from the Context: Basic vs Advanced certificate, age requirements, drone weight rules (e.g. 250g–25kg), registration, and when flight school or flight review is required vs optional.\n"
+                "(3) Be precise: if you mention flight school or any option, say whether it is required or optional and for which path (Basic/Advanced).\n"
+                "Use a short numbered list or short paragraphs if helpful. Reference the Drone Management Portal when relevant. Stay on topic; no filler.\n"
+            )
 
-If the Context mentions "122 metres" or "400 feet" or "stay below" for where you can fly or BVLOS, that is the general maximum height—cite it for "how high" / "maximum height" questions. Do not say the context lacks it if that passage is present.
+        certificate_comparison_instruction = ""
+        if _is_basic_advanced_certificate_comparison(query):
+            certificate_comparison_instruction = (
+                "\n\nIMPORTANT: The user is asking about Basic vs Advanced (pilot) certificate in Canada. Give a direct, helpful answer. "
+                "Use the Context when it describes these certificates. If the Context does not spell out every difference, you may include the standard Canadian distinctions: "
+                "controlled airspace access (Advanced can operate in controlled airspace with approval; Basic is more restricted), "
+                "minimum distance from bystanders, flight review requirement (Advanced typically requires a flight review), and operational privileges. "
+                "Cite Transport Canada or the Drone Management Portal for full details. Do NOT reply with 'the context does not contain' or 'I cannot answer'—answer the question.\n"
+            )
 
-Give a direct answer first and always finish your answer. Only if the Context truly has no relevant information, say so in one sentence and suggest the source links.
+        prompt = f"""You are a helpful assistant for Canadian drone safety and regulations. Prefer the Context below when it answers the question.
+
+Rules:
+- Be direct and precise. No filler or vague hedging ("you may need to", "it depends") unless the Context actually says so.
+- State only what the Context says. Cite specific numbers or limits when the Context mentions them (e.g. age, weight 250g–25kg). Do NOT list section titles or link names.
+- For "how do I" questions (e.g. get a licence): give a structured answer with steps and key requirements (Basic vs Advanced, registration, exam, flight review when applicable). For simple factual questions, a few clear sentences are enough.
+- If you mention something (e.g. flight school), say whether it is required or optional and for whom.
+{comparison_instruction}
+{procedural_instruction}
+{certificate_comparison_instruction}
 
 Context:
 {context}
@@ -270,21 +402,30 @@ Question: {query}
 
 Answer:"""
 
-        answer = _gemini_generate_content(
-            self.gemini_api_key, prompt, temperature=0.1, max_tokens=2048
-        )
+        model_used = None
+        if self.openrouter_api_key:
+            answer, model_used = _openrouter_generate_content(
+                self.openrouter_api_key, prompt, temperature=0.1, max_tokens=2048
+            )
+        elif self.gemini_api_key:
+            answer, model_used = _gemini_generate_content(
+                self.gemini_api_key, prompt, temperature=0.1, max_tokens=2048
+            )
+        else:
+            answer = None
 
         if answer is None:
-            # Local fallback when all Gemini models fail (quota/404)
+            model_used = None
             summary_len = 800
             summary = (context.strip()[:summary_len] + "...") if len(context.strip()) > summary_len else context.strip()
             answer = (
                 "I couldn't reach the AI (quota or model unavailable). "
-                "Here are relevant excerpts from the documentation:\n\n" + summary
+                "Try again later or check your API quota. Here are relevant excerpts from the documentation:\n\n" + summary
             )
 
         return {
             "answer": answer,
+            "model": model_used,
             "sources": _first_three_source_links(used_metadatas),
             "context_used": len(context_parts),
         }

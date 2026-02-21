@@ -25,9 +25,10 @@ venv\scripts\activate
 ```
 pip install -r requirements.txt
 ```
-4. Add your Gemini API key to a `.env` file in the project root:
+4. Add an API key to a `.env` file in the project root (use one or both):
 ```
-GEMINI_API_KEY=your_key_here
+OPENROUTER_API_KEY=sk-or-v1-...   # Recommended: get at https://openrouter.ai/keys
+GEMINI_API_KEY=...                 # Optional: for direct Gemini or embeddings (USE_GEMINI_EMBEDDINGS=1)
 ```
 5. Run flask app
 ```

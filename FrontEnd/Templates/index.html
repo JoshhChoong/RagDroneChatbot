@@ -81,6 +81,7 @@
         .message .sources strong { color: var(--accent); }
         .message .sources a { color: var(--accent); text-decoration: none; }
         .message .sources a:hover { text-decoration: underline; }
+        .message .model-used { font-size: 0.75rem; color: var(--muted); margin-top: 6px; }
         .message.error { background: rgba(248,113,113,0.15); border-color: var(--error); color: var(--error); }
         .message.assistant ul, .message.assistant ol { margin: 0.5em 0 0.5em 1.2em; padding-left: 1em; }
         .message.assistant li { margin: 0.25em 0; }
@@ -204,29 +205,38 @@
 
             setLoading(true);
 
+            const timeoutMs = 180000; // 3 minutes for retrieval + generation
+            const controller = new AbortController();
+            const timeoutId = setTimeout(function() { controller.abort(); }, timeoutMs);
+
             fetch('/ask', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: query })
+                body: JSON.stringify({ query: query }),
+                signal: controller.signal
             })
                 .then(res => res.json())
                 .then(data => {
+                    clearTimeout(timeoutId);
                     document.getElementById(typingId)?.remove();
                     if (data.error) {
                         addMessage('Error: ' + data.error, 'assistant', true, false);
                     } else {
                         const answerHtml = (typeof marked !== 'undefined' ? marked.parse(data.answer || '') : (data.answer || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
                         const sources = formatSources(data.sources);
+                        const modelLine = data.model ? '<div class="model-used">Model: ' + (data.model).replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' : '';
                         const div = document.createElement('div');
                         div.className = 'message assistant';
-                        div.innerHTML = answerHtml + sources;
+                        div.innerHTML = answerHtml + sources + modelLine;
                         chatEl.appendChild(div);
                         chatEl.scrollTop = chatEl.scrollHeight;
                     }
                 })
                 .catch(err => {
+                    clearTimeout(timeoutId);
                     document.getElementById(typingId)?.remove();
-                    addMessage('Network error: ' + err.message, 'assistant', true);
+                    const msg = (err.name === 'AbortError') ? 'Request timed out. The AI may be slow—try again or use a shorter query.' : ('Network error: ' + err.message);
+                    addMessage(msg, 'assistant', true);
                 })
                 .finally(() => setLoading(false));
         }

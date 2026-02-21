@@ -24,6 +24,40 @@ def _is_height_altitude_query(query: str) -> bool:
     )
 
 
+def _is_comparison_query(query: str) -> bool:
+    """True if the user is asking to compare/contrast two or more distinct concepts."""
+    q = query.strip().lower()
+    if any(
+        p in q
+        for p in (
+            "difference between",
+            "difference of",
+            "compare",
+            "contrast",
+            " vs ",
+            " versus ",
+        )
+    ):
+        return True
+    if " and " in q and ("difference" in q or "different" in q or "same" in q):
+        return True
+    return False
+
+
+def _is_procedural_query(query: str) -> bool:
+    """True if the user is asking HOW to do something (e.g. get a licence, register)—needs steps and requirements."""
+    q = query.strip().lower()
+    if not ("how" in q or "what do i need" in q or "steps" in q or "process" in q):
+        return False
+    return any(
+        w in q
+        for w in (
+            "licen", "certificate", "register", "pilot", "permit", "fly",
+            "get ", "become", "apply", "requirement", "need to",
+        )
+    )
+
+
 def _expand_query_for_embedding(query: str) -> str:
     """Minimal query expansion for RAG: domain context + conceptual synonyms only.
 
@@ -44,6 +78,21 @@ def _expand_query_for_embedding(query: str) -> str:
         parts.append("pilot certificate licensing")
     if "register" in q:
         parts.append("registration")
+    # For procedural "how do I get my licence" questions, pull chunks that explain steps and requirements
+    if _is_procedural_query(query):
+        parts.append("Basic Advanced certificate registration age weight 250 flight review exam steps requirements Drone Management Portal")
+    # For comparison queries (e.g. "difference between SFOC and RPAS"), add both terms
+    # so we retrieve chunks that define each concept, not only the hybrid (e.g. "SFOC-RPAS").
+    if _is_comparison_query(query):
+        words = re.findall(r"[A-Za-z0-9]{2,}", query.strip())
+        stop = {"the", "and", "between", "what", "whats", "difference", "different", "same", "compare", "contrast", "vs", "versus", "how", "does", "do", "is", "are", "can", "certificate", "certificates"}
+        terms = [w for w in words if w.lower() not in stop]
+        if terms:
+            parts.append(" ".join(terms))
+            parts.append("definition requirements")
+        # Basic vs Advanced certificate: pull chunks that explain differences (airspace, bystanders, flight review, privileges)
+        if "basic" in q or "advanced" in q:
+            parts.append("Basic Advanced certificate controlled airspace bystanders distance flight review operational privileges requirements")
     return " ".join(parts)
 
 
@@ -56,6 +105,12 @@ def _rerank_by_keyword_overlap(query: str, documents: List, metadatas: List, dis
     if _is_height_altitude_query(query):
         # Boost chunks that state the standard limit (122 m / 400 ft) so the general rule is retrieved
         terms.update(["metres", "feet", "below", "above", "airspace", "stay", "height", "altitude", "122", "400"])
+    if _is_procedural_query(query):
+        # Boost chunks that explain steps and requirements (Basic/Advanced, registration, exam, flight review)
+        terms.update(["basic", "advanced", "certificate", "registration", "exam", "flight", "review", "portal", "250", "weight"])
+    # Basic vs Advanced comparison: boost chunks that explain differences
+    if _is_comparison_query(query) and ("basic" in query.lower() or "advanced" in query.lower()):
+        terms.update(["basic", "advanced", "controlled", "airspace", "bystanders", "flight", "review", "operational", "privileges", "distance"])
     if not terms:
         return documents, metadatas, distances
 
