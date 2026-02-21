@@ -2,6 +2,8 @@
 
 Designed to help aspiring pilots not break laws :3. Datasets come from canadian sources (Transport canada, Government of Canada open data portal). 
 
+Video demo - https://www.youtube.com/watch?v=1lQo_m-fVo8
+
 AutoImmunePipeline is designed to prevent data poisoning, including jurisdictional poisoning (data from other regions creeping into answer)
 
 QA questions:
