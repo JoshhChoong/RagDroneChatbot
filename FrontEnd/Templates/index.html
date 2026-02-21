@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drone Safety Assistant | Canada</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --border: #334155;
+            --text: #f1f5f9;
+            --muted: #94a3b8;
+            --accent: #38bdf8;
+            --accent-hover: #7dd3fc;
+            --error: #f87171;
+            --user-msg: #1e3a5f;
+            --radius: 12px;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 24px;
+        }
+        .container {
+            width: 100%;
+            max-width: 720px;
+        }
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 4px;
+            color: var(--text);
+        }
+        .subtitle {
+            color: var(--muted);
+            font-size: 0.9rem;
+            margin-bottom: 24px;
+        }
+        .chat {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            min-height: 320px;
+            max-height: 55vh;
+            overflow-y: auto;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .message {
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            line-height: 1.5;
+        }
+        .message.user {
+            background: var(--user-msg);
+            margin-left: 24px;
+            border-bottom-right-radius: 4px;
+        }
+        .message.assistant {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            margin-right: 24px;
+            border-bottom-left-radius: 4px;
+        }
+        .message .sources {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-top: 10px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+        }
+        .message .sources strong { color: var(--accent); }
+        .message .sources a { color: var(--accent); text-decoration: none; }
+        .message .sources a:hover { text-decoration: underline; }
+        .message.error { background: rgba(248,113,113,0.15); border-color: var(--error); color: var(--error); }
+        .message.assistant ul, .message.assistant ol { margin: 0.5em 0 0.5em 1.2em; padding-left: 1em; }
+        .message.assistant li { margin: 0.25em 0; }
+        .message.assistant strong { font-weight: 600; color: var(--text); }
+        .message.assistant p { margin: 0.5em 0; }
+        .message.assistant p:first-child { margin-top: 0; }
+        .message.assistant p:last-child { margin-bottom: 0; }
+        .typing {
+            color: var(--muted);
+            font-style: italic;
+        }
+        .input-row {
+            display: flex;
+            gap: 10px;
+            align-items: stretch;
+        }
+        #queryInput {
+            flex: 1;
+            padding: 14px 18px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            color: var(--text);
+            font-size: 1rem;
+        }
+        #queryInput::placeholder { color: var(--muted); }
+        #queryInput:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(56,189,248,0.2);
+        }
+        .ask-btn {
+            padding: 14px 24px;
+            background: var(--accent);
+            color: var(--bg);
+            border: none;
+            border-radius: var(--radius);
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        .ask-btn:hover { background: var(--accent-hover); }
+        .ask-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .footer {
+            margin-top: 24px;
+            font-size: 0.8rem;
+            color: var(--muted);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Drone Safety Assistant</h1>
+        <p class="subtitle">Ask about Transport Canada drone rules, registration, and licensing.</p>
+
+        <div class="chat" id="chat">
+            <div class="message assistant">
+                Ask a question about drone safety in Canada, e.g. how to register, get a pilot certificate, or where you can fly.
+            </div>
+        </div>
+
+        <div class="input-row">
+            <input type="text" id="queryInput" placeholder="e.g. How do I register my drone? What’s the max altitude?" autocomplete="off">
+            <button type="button" class="ask-btn" id="askBtn" onclick="askQuestion()">Ask</button>
+        </div>
+
+        <p class="footer">Answers are based on Transport Canada drone safety documentation. Re-run ingestion after updating the dataset.</p>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        marked.setOptions({ gfm: true, breaks: true });
+        const chatEl = document.getElementById('chat');
+        const inputEl = document.getElementById('queryInput');
+        const btnEl = document.getElementById('askBtn');
+
+        function addMessage(content, role, isError = false, isMarkdown = false) {
+            const div = document.createElement('div');
+            div.className = 'message ' + role + (isError ? ' error' : '');
+            if (isMarkdown && typeof marked !== 'undefined') {
+                div.innerHTML = marked.parse(content || '');
+            } else {
+                div.textContent = content || '';
+            }
+            chatEl.appendChild(div);
+            chatEl.scrollTop = chatEl.scrollHeight;
+        }
+
+        function setLoading(loading) {
+            btnEl.disabled = loading;
+            inputEl.disabled = loading;
+        }
+
+        function formatSources(sources) {
+            if (!sources || !sources.length) return '';
+            const list = sources.slice(0, 3).map(function(s) {
+                if (s && typeof s === 'object' && s.url) {
+                    const url = s.url.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+                    const title = (s.title || s.url).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+                    return '<a href="' + url + '" target="_blank" rel="noopener">' + title + '</a>';
+                }
+                return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+            });
+            return '<div class="sources"><strong>Sources:</strong> ' + list.join(' &middot; ') + '</div>';
+        }
+
+        function askQuestion() {
+            const query = inputEl.value.trim();
+            if (!query) return;
+
+            addMessage(query, 'user');
+            inputEl.value = '';
+
+            const typingId = 'typing-' + Date.now();
+            const typingEl = document.createElement('div');
+            typingEl.id = typingId;
+            typingEl.className = 'message assistant typing';
+            typingEl.textContent = 'Looking up regulations…';
+            chatEl.appendChild(typingEl);
+            chatEl.scrollTop = chatEl.scrollHeight;
+
+            setLoading(true);
+
+            fetch('/ask', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: query })
+            })
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById(typingId)?.remove();
+                    if (data.error) {
+                        addMessage('Error: ' + data.error, 'assistant', true, false);
+                    } else {
+                        const answerHtml = (typeof marked !== 'undefined' ? marked.parse(data.answer || '') : (data.answer || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+                        const sources = formatSources(data.sources);
+                        const div = document.createElement('div');
+                        div.className = 'message assistant';
+                        div.innerHTML = answerHtml + sources;
+                        chatEl.appendChild(div);
+                        chatEl.scrollTop = chatEl.scrollHeight;
+                    }
+                })
+                .catch(err => {
+                    document.getElementById(typingId)?.remove();
+                    addMessage('Network error: ' + err.message, 'assistant', true);
+                })
+                .finally(() => setLoading(false));
+        }
+
+        inputEl.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') askQuestion();
+        });
+    </script>
+</body>
+</html>
