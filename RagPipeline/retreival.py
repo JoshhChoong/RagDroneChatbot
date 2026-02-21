@@ -45,8 +45,10 @@ def _is_comparison_query(query: str) -> bool:
 
 
 def _is_procedural_query(query: str) -> bool:
-    """True if the user is asking HOW to do something (e.g. get a licence, register)—needs steps and requirements."""
+    """True if the user is asking HOW to do something (e.g. get a licence, register)—needs steps and requirements. Excludes preparation-for-exam questions."""
     q = query.strip().lower()
+    if "preparation" in q or "prep " in q or "prepare" in q or "studying" in q or ("study " in q and "exam" in q):
+        return False  # preparation questions use different expansion/rerank
     if not ("how" in q or "what do i need" in q or "steps" in q or "process" in q):
         return False
     return any(
@@ -56,6 +58,15 @@ def _is_procedural_query(query: str) -> bool:
             "get ", "become", "apply", "requirement", "need to",
         )
     )
+
+
+def _is_preparation_for_exam_query(query: str) -> bool:
+    """True if the user is asking about PREPARATION for the exam (what to study, how prep differs)—use prep-focused expansion, not weight/certificate."""
+    q = query.strip().lower()
+    prep_words = ("preparation", "prep", "prepare", "preparing", "study", "studying", "ready", "apply to the exam")
+    if not any(w in q for w in prep_words):
+        return False
+    return "exam" in q or "test" in q or "basic" in q or "advanced" in q or "differ" in q
 
 
 def _expand_query_for_embedding(query: str) -> str:
@@ -78,9 +89,13 @@ def _expand_query_for_embedding(query: str) -> str:
         parts.append("pilot certificate licensing")
     if "register" in q:
         parts.append("registration")
-    # For procedural "how do I get my licence" questions, pull chunks that explain steps and requirements
+    # For procedural "how do I get my licence" questions, pull chunks that explain steps and requirements (not preparation—that uses its own expansion)
     if _is_procedural_query(query):
         parts.append("Basic Advanced certificate registration age weight 250 flight review exam steps requirements Drone Management Portal")
+    # For "how can I prepare for the exam": pull chunks about study guide, airspace, NOTAMs, weather, RPAS, practice exams
+    if _is_preparation_for_exam_query(query):
+        parts.append("preparation study materials Basic Advanced exam what to study how to prepare content flight school ground school")
+        parts.append("study guide Transport Canada airspace NOTAMs weather RPAS regulations practice exam Drone Management Portal")
     # For comparison queries (e.g. "difference between SFOC and RPAS"), add both terms
     # so we retrieve chunks that define each concept, not only the hybrid (e.g. "SFOC-RPAS").
     if _is_comparison_query(query):
@@ -93,6 +108,9 @@ def _expand_query_for_embedding(query: str) -> str:
         # Basic vs Advanced certificate: pull chunks that explain differences (airspace, bystanders, flight review, privileges)
         if "basic" in q or "advanced" in q:
             parts.append("Basic Advanced certificate controlled airspace bystanders distance flight review operational privileges requirements")
+    # Basic vs Advanced EXAM: pull chunks about exam content, difficulty, flight review after exam, NAV CANADA, emergency procedures
+    if ("basic" in q or "advanced" in q) and ("exam" in q or "test" in q or "assessment" in q):
+        parts.append("Basic Advanced exam flight review after exam NAV CANADA emergency procedures airspace content difficulty")
     return " ".join(parts)
 
 
@@ -108,9 +126,16 @@ def _rerank_by_keyword_overlap(query: str, documents: List, metadatas: List, dis
     if _is_procedural_query(query):
         # Boost chunks that explain steps and requirements (Basic/Advanced, registration, exam, flight review)
         terms.update(["basic", "advanced", "certificate", "registration", "exam", "flight", "review", "portal", "250", "weight"])
+    if _is_preparation_for_exam_query(query):
+        # Boost chunks about preparation, study guide, airspace, NOTAMs, weather, RPAS, practice exams—actionable prep content
+        terms.update(["preparation", "study", "materials", "exam", "basic", "advanced", "content", "prepare", "differ", "flight", "school", "ground", "guide", "airspace", "notam", "weather", "rpas", "practice", "regulations", "portal"])
     # Basic vs Advanced comparison: boost chunks that explain differences
     if _is_comparison_query(query) and ("basic" in query.lower() or "advanced" in query.lower()):
         terms.update(["basic", "advanced", "controlled", "airspace", "bystanders", "flight", "review", "operational", "privileges", "distance"])
+    # Basic vs Advanced EXAM: boost chunks about exam content, flight review requirement, NAV CANADA, emergency procedures
+    q_lower = query.lower()
+    if ("basic" in q_lower or "advanced" in q_lower) and ("exam" in q_lower or "test" in q_lower or "assessment" in q_lower):
+        terms.update(["exam", "flight", "review", "nav", "canada", "emergency", "procedures", "airspace", "content", "difficulty"])
     if not terms:
         return documents, metadatas, distances
 

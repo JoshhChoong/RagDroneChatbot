@@ -295,11 +295,32 @@ def _is_procedural_query(query: str) -> bool:
 
 
 def _is_basic_advanced_certificate_comparison(query: str) -> bool:
-    """True if the user is comparing Basic vs Advanced (pilot) certificate—answer from context or standard Canadian distinctions."""
+    """True if the user is comparing Basic vs Advanced (pilot) certificate—answer from context or standard Canadian distinctions. Excludes exam-specific questions."""
     q = query.strip().lower()
     if "basic" not in q and "advanced" not in q:
         return False
+    if "exam" in q or "test" in q or "assessment" in q:
+        return False  # exam questions use exam_comparison_instruction instead
     return "certificate" in q or "licen" in q or "pilot" in q or _is_comparison_query(query)
+
+
+def _is_basic_advanced_exam_comparison(query: str) -> bool:
+    """True if the user is comparing Basic vs Advanced EXAM (not certificate privileges)—answer about exam content, difficulty, and post-exam flight review. Excludes preparation questions."""
+    q = query.strip().lower()
+    if "preparation" in q or "prep " in q or "prepare" in q or "studying" in q or "study " in q:
+        return False  # preparation questions use preparation_instruction instead
+    if ("basic" not in q and "advanced" not in q) or ("exam" not in q and "test" not in q and "assessment" not in q):
+        return False
+    return _is_comparison_query(query) or ("difference" in q or "different" in q or "between" in q)
+
+
+def _is_preparation_for_exam_query(query: str) -> bool:
+    """True if the user is asking about PREPARATION for the exam (what to study, how prep differs)—answer about prep, NOT weight thresholds or certificate requirement."""
+    q = query.strip().lower()
+    prep_words = ("preparation", "prep", "prepare", "preparing", "study", "studying", "ready", "apply to the exam")
+    if not any(w in q for w in prep_words):
+        return False
+    return "exam" in q or "test" in q or "basic" in q or "advanced" in q or "differ" in q
 
 
 def _first_three_source_links(used_metadatas: List[dict]) -> List[Dict[str, str]]:
@@ -384,6 +405,24 @@ class RAGSystem:
                 "Cite Transport Canada or the Drone Management Portal for full details. Do NOT reply with 'the context does not contain' or 'I cannot answer'—answer the question.\n"
             )
 
+        exam_comparison_instruction = ""
+        if _is_basic_advanced_exam_comparison(query):
+            exam_comparison_instruction = (
+                "\n\nIMPORTANT: The user is asking about the **EXAMS** (Basic vs Advanced exam), NOT certificate privileges. Answer about the exams themselves:\n"
+                "(1) **Exam content/difficulty:** Advanced exam is harder and covers more: complex airspace, NAV CANADA coordination, emergency procedures; Basic exam is more limited.\n"
+                "(2) **After the exam:** Advanced requires a flight review after passing the exam; Basic does not require a flight review.\n"
+                "(3) Do NOT answer about certificate privileges (controlled airspace, EVLOS, sheltered operations) unless you explain each term in one line. Prefer plain language; avoid dropping jargon without context. Focus on exam differences.\n"
+                "Use the Context when it describes exam content or flight review. Cite Transport Canada or the Drone Management Portal for full details.\n"
+            )
+
+        preparation_instruction = ""
+        if _is_preparation_for_exam_query(query):
+            preparation_instruction = (
+                "\n\nIMPORTANT: The user is asking about **PREPARATION** for the drone exam. Give **actionable** advice—concrete topics and resources. Do NOT give a vague answer like 'study resources are available' or 'a recommended learning path exists'.\n"
+                "Include specific topics to study when relevant (from Context or standard Canadian prep): Transport Canada study guide, airspace rules, NOTAMs, weather, RPAS regulations, practice exams. Name where to find them (e.g. Drone Management Portal, Transport Canada website). For Basic exam: airspace, weather, RPAS rules, practice questions. For Advanced: add NAV CANADA, controlled airspace, emergency procedures.\n"
+                "Do NOT answer about 250g or certificate requirement unless the user asked. If the Context names specific resources or study guides, list them. End with a clear next step (e.g. use the Transport Canada study guide, take practice exams on the Portal).\n"
+            )
+
         prompt = f"""You are a helpful assistant for Canadian drone safety and regulations. Prefer the Context below when it answers the question.
 
 Rules:
@@ -394,6 +433,8 @@ Rules:
 {comparison_instruction}
 {procedural_instruction}
 {certificate_comparison_instruction}
+{exam_comparison_instruction}
+{preparation_instruction}
 
 Context:
 {context}
